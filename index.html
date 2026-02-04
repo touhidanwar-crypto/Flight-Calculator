@@ -1,20 +1,399 @@
-<!DOCTYPE html>
-<html>
-<head>
-  <title>Calculator App</title>
-</head>
-<body>
-  <h1>My Calculator App</h1>
-  <input id="display" disabled />
-  <br><br>
-  <button onclick="append('1')">1</button>
-  <button onclick="append('2')">2</button>
-  <button onclick="append('3')">3</button>
-  <button onclick="append('+')">+</button>
-  <br><br>
-  <button onclick="calculate()">=</button>
-  <button onclick="clearDisplay()">C</button>
+import React, { useState, useEffect, useCallback, useMemo } from 'react';
 
-  <script src="script.js"></script>
-</body>
-</html>
+// --- 1. Type Definitions (Consolidated for standalone usage) ---
+
+enum FlightType {
+  Domestic = 'Domestic',
+  International = 'International',
+}
+
+enum ActionType {
+  Reschedule = 'Reschedule',
+  Cancellation = 'Cancellation',
+}
+
+interface CalculationResult {
+  c5: number;
+  c6: number;
+  addons: number;
+  convenience: number;
+  service: number;
+  total: number;
+  labelC5: string;
+  labelC6: string;
+  totalLabel: string;
+}
+
+interface OfflineResult {
+  pax: number;
+  c5PerPax: number;
+  c6PerPax: number;
+  convPerPax: number;
+  servicePerPax: number;
+  totalPerPax: number;
+}
+
+// --- 2. Configuration Constants ---
+const CONFIG = {
+  SERVICE_CHARGES: {
+    [FlightType.Domestic]: 500,
+    [FlightType.International]: 1000,
+  },
+  CONVENIENCE_RATE: 0.0215, // 2.15%
+  ROUNDING_STEP: 10, // Pad total to next multiple of 10
+  ANIMATION_DURATION: 600, // ms
+} as const;
+
+// --- 3. Helper Functions ---
+
+/**
+ * Formats a number into Indian Currency String (e.g., 1,00,000)
+ */
+const formatINR = (val: number): string => {
+  if (isNaN(val)) return '0';
+  return val.toLocaleString('en-IN', {
+    maximumFractionDigits: 0,
+    minimumFractionDigits: 0,
+  });
+};
+
+/**
+ * Parses a formatted string back to a raw number
+ */
+const parseNum = (val: string): number => {
+  if (!val) return 0;
+  return Number(val.replace(/,/g, '')) || 0;
+};
+
+/**
+ * Calculates the convenience fee with specific padding logic
+ * Logic: 2.15% of base, rounded up, then padded to next 10
+ */
+const calculateConvenienceFee = (baseAmount: number): number => {
+  if (baseAmount <= 0) return 0;
+  
+  const fee = Math.ceil(baseAmount * CONFIG.CONVENIENCE_RATE);
+  const currentTotal = baseAmount + fee;
+  const padding = (CONFIG.ROUNDING_STEP - (currentTotal % CONFIG.ROUNDING_STEP)) % CONFIG.ROUNDING_STEP;
+  
+  return fee + padding;
+};
+
+// --- 4. Sub-Components ---
+
+interface ResultRowProps {
+  label: string;
+  value: number;
+  colorClass: string;
+}
+
+const ResultRow: React.FC<ResultRowProps> = ({ label, value, colorClass }) => (
+  <div className="flex justify-between items-center text-sm md:text-base">
+    <span className="text-white/80 font-medium">{label}</span>
+    <span className={`font-bold tabular-nums ${colorClass}`}>₹{formatINR(value)}</span>
+  </div>
+);
+
+// --- 5. Main Component ---
+
+const App: React.FC = () => {
+  // State
+  const [flightType, setFlightType] = useState<FlightType>(FlightType.Domestic);
+  const [actionType, setActionType] = useState<ActionType>(ActionType.Reschedule);
+  
+  const [c5, setC5] = useState<string>('');
+  const [c6, setC6] = useState<string>('');
+  const [addons, setAddons] = useState<string>('');
+  const [offlinePax, setOfflinePax] = useState<string>('');
+  
+  const [isOfflineOpen, setIsOfflineOpen] = useState(false);
+  const [isResetting, setIsResetting] = useState(false);
+
+  const [result, setResult] = useState<CalculationResult>({
+    c5: 0,
+    c6: 0,
+    addons: 0,
+    convenience: 0,
+    service: 0,
+    total: 0,
+    labelC5: 'Airline Reissue Charge',
+    labelC6: 'Difference of Fare',
+    totalLabel: 'Additional Amount',
+  });
+
+  const [offlineResult, setOfflineResult] = useState<OfflineResult | null>(null);
+
+  // Derived Value: Service Charge
+  const serviceCharge = useMemo(() => CONFIG.SERVICE_CHARGES[flightType], [flightType]);
+
+  // --- Core Calculation Logic ---
+  const calculate = useCallback(() => {
+    const isCancel = actionType === ActionType.Cancellation;
+    const c5v = parseNum(c5);
+    const c6v = parseNum(c6);
+    const addv = parseNum(addons);
+
+    let total = 0;
+    let convenience = 0;
+
+    if (isCancel) {
+      // Cancellation Logic: Paid - (Penalty + Addons + Service)
+      total = Math.max(c5v - (c6v + addv + serviceCharge), 0);
+    } else {
+      // Reschedule Logic: Penalty + Diff + Service + Convenience
+      if (c5v || c6v) {
+        const base = c5v + c6v + serviceCharge;
+        convenience = calculateConvenienceFee(base);
+        total = base + convenience;
+      }
+    }
+
+    setResult({
+      c5: c5v,
+      c6: c6v,
+      addons: addv,
+      convenience,
+      service: serviceCharge,
+      total,
+      labelC5: isCancel ? 'Amount Already Paid' : 'Airline Reissue Charge',
+      labelC6: isCancel ? 'Airline Cancellation Charge' : 'Difference of Fare',
+      totalLabel: isCancel ? 'Refund Amount' : 'Additional Amount',
+    });
+  }, [flightType, actionType, c5, c6, addons, serviceCharge]);
+
+  // Recalculate on any dependency change
+  useEffect(() => {
+    calculate();
+  }, [calculate]);
+
+  // Offline Breakdown Logic
+  useEffect(() => {
+    const paxCount = Number(offlinePax) || 0;
+    
+    // Only calculate breakdown for Reschedule with valid passenger count
+    if (paxCount > 0 && actionType === ActionType.Reschedule && result.total > 0) {
+      setOfflineResult({
+        pax: paxCount,
+        c5PerPax: Math.round(result.c5 / paxCount),
+        c6PerPax: Math.round(result.c6 / paxCount),
+        convPerPax: Math.round(result.convenience / paxCount),
+        servicePerPax: Math.round(result.service / paxCount),
+        totalPerPax: Math.round(result.total / paxCount),
+      });
+    } else {
+      setOfflineResult(null);
+    }
+  }, [offlinePax, result, actionType]);
+
+  // --- Handlers ---
+
+  const handleReset = () => {
+    setIsResetting(true);
+    // Clear inputs
+    setC5('');
+    setC6('');
+    setAddons('');
+    setOfflinePax('');
+    setIsOfflineOpen(false);
+
+    // Reset animation state after CSS transition finishes
+    setTimeout(() => {
+      setIsResetting(false);
+    }, CONFIG.ANIMATION_DURATION);
+  };
+
+  const handleInputChange = (setter: React.Dispatch<React.SetStateAction<string>>) => (e: React.ChangeEvent<HTMLInputElement>) => {
+    // Strip non-digits, allowing for clean typing
+    const raw = e.target.value.replace(/\D/g, '');
+    
+    // Only update if the value has actually changed (prevents cursor jumping on formatting re-renders)
+    const currentRaw = parseNum(setter.toString() || ''); // Note: setter is a function, tricky to compare directly in some setups, simplified here:
+    
+    if (raw === '' && e.target.value === '') {
+       setter('');
+    } else {
+       setter(raw ? formatINR(Number(raw)) : '');
+    }
+  };
+
+  return (
+    <div className="min-h-screen w-full flex items-center justify-center relative p-4 bg-cover bg-center font-sans" 
+         style={{ backgroundImage: "url('https://images.unsplash.com/photo-1436491865332-7a61a1092e51?auto=format&fit=crop&q=80&w=2070')" }}>
+      
+      {/* Background Overlay */}
+      <div className="absolute inset-0 bg-black/50 backdrop-blur-sm"></div>
+
+      <div className="relative z-10 w-full max-w-xl">
+        {/* Main Card */}
+        <div className="bg-white/20 backdrop-blur-xl rounded-[2.5rem] shadow-2xl p-6 md:p-8 border border-white/30 transition-all duration-300">
+          
+          {/* Header */}
+          <div className="flex justify-between items-center mb-6">
+            <h1 className="text-2xl md:text-3xl font-extrabold text-navy-900 drop-shadow-sm flex items-center gap-3">
+              <span className="text-indigo-700 text-3xl">✈</span>
+              <span className="text-white drop-shadow-md">CloudFly Calculator</span>
+            </h1>
+            
+            {/* Reset Button with 3D Animation */}
+            <button 
+              onClick={handleReset}
+              className={`relative w-14 h-14 rounded-2xl overflow-hidden shadow-lg transform transition-all duration-500 ${isResetting ? 'rotate-180 scale-110' : 'hover:scale-105 active:scale-95'}`}
+              aria-label="Reset Calculator"
+            >
+              <div className="absolute inset-0 bg-indigo-600 flex flex-col items-center justify-center text-white">
+                <svg className="w-6 h-6 mb-1" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" /></svg>
+              </div>
+            </button>
+          </div>
+
+          {/* Controls Grid */}
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-6">
+            <div className="space-y-1">
+              <label className="text-xs font-bold text-gray-200 uppercase tracking-wider ml-1">Flight Type</label>
+              <select 
+                value={flightType}
+                onChange={(e) => setFlightType(e.target.value as FlightType)}
+                className="w-full p-3 rounded-xl bg-white/70 border-none outline-none focus:ring-2 focus:ring-indigo-500 font-semibold text-gray-800 appearance-none cursor-pointer hover:bg-white/80 transition-colors"
+              >
+                <option value={FlightType.Domestic}>Domestic</option>
+                <option value={FlightType.International}>International</option>
+              </select>
+            </div>
+            <div className="space-y-1">
+              <label className="text-xs font-bold text-gray-200 uppercase tracking-wider ml-1">Action</label>
+              <select 
+                value={actionType}
+                onChange={(e) => setActionType(e.target.value as ActionType)}
+                className="w-full p-3 rounded-xl bg-white/70 border-none outline-none focus:ring-2 focus:ring-indigo-500 font-semibold text-gray-800 appearance-none cursor-pointer hover:bg-white/80 transition-colors"
+              >
+                <option value={ActionType.Reschedule}>Reschedule</option>
+                <option value={ActionType.Cancellation}>Cancellation</option>
+              </select>
+            </div>
+          </div>
+
+          {/* Dynamic Inputs */}
+          <div className="space-y-4">
+            <div className="space-y-1">
+              <label className="text-sm font-bold text-gray-100 ml-1">{result.labelC5}</label>
+              <input 
+                type="text"
+                inputMode="numeric"
+                value={c5}
+                onChange={handleInputChange(setC5)}
+                placeholder="0"
+                className="w-full p-4 rounded-xl bg-white/80 border-none outline-none focus:ring-2 focus:ring-indigo-500 font-bold text-xl text-center text-gray-800 placeholder-gray-400 shadow-inner"
+              />
+            </div>
+            <div className="space-y-1">
+              <label className="text-sm font-bold text-gray-100 ml-1">{result.labelC6}</label>
+              <input 
+                type="text"
+                inputMode="numeric"
+                value={c6}
+                onChange={handleInputChange(setC6)}
+                placeholder="0"
+                className="w-full p-4 rounded-xl bg-white/80 border-none outline-none focus:ring-2 focus:ring-indigo-500 font-bold text-xl text-center text-gray-800 placeholder-gray-400 shadow-inner"
+              />
+            </div>
+
+            {actionType === ActionType.Cancellation && (
+              <div className="space-y-1 animate-in fade-in slide-in-from-bottom-2 duration-300">
+                <label className="text-sm font-bold text-gray-100 ml-1">Add-ons (Meals/Seats)</label>
+                <input 
+                  type="text"
+                  inputMode="numeric"
+                  value={addons}
+                  onChange={handleInputChange(setAddons)}
+                  placeholder="0"
+                  className="w-full p-4 rounded-xl bg-white/80 border-none outline-none focus:ring-2 focus:ring-indigo-500 font-bold text-xl text-center text-gray-800 placeholder-gray-400 shadow-inner"
+                />
+              </div>
+            )}
+          </div>
+
+          {/* Result Card */}
+          <div className="mt-8 bg-black/40 backdrop-blur-md rounded-3xl p-6 border border-white/10 shadow-inner">
+            <div className="space-y-3">
+              <ResultRow label={result.labelC5} value={result.c5} colorClass="text-blue-300" />
+              <ResultRow label={result.labelC6} value={result.c6} colorClass="text-purple-300" />
+              
+              {actionType === ActionType.Cancellation && (
+                <ResultRow label="Add-ons Deducted" value={result.addons} colorClass="text-red-300" />
+              )}
+              
+              {actionType === ActionType.Reschedule && (
+                <ResultRow label={`Convenience (${(CONFIG.CONVENIENCE_RATE * 100).toFixed(2)}%)`} value={result.convenience} colorClass="text-green-300" />
+              )}
+              
+              <ResultRow label="Service Charge" value={result.service} colorClass="text-gray-300" />
+              
+              <div className="pt-4 mt-4 border-t border-white/20 flex justify-between items-end">
+                <span className={`text-lg font-black tracking-wide ${actionType === ActionType.Cancellation ? 'text-green-400' : 'text-yellow-400'}`}>
+                  {result.totalLabel}
+                </span>
+                <span className={`text-4xl font-black tracking-tight ${actionType === ActionType.Cancellation ? 'text-green-400' : 'text-yellow-400'}`}>
+                  ₹{formatINR(result.total)}
+                </span>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        {/* Offline Toggle Sidebar (Reschedule Only) */}
+        {actionType === ActionType.Reschedule && (
+          <div className={`mt-6 transition-all duration-500 ease-in-out transform origin-top`}>
+             <div className="flex justify-center mb-4">
+                <button 
+                  onClick={() => setIsOfflineOpen(!isOfflineOpen)}
+                  className={`group relative px-8 py-3 rounded-full font-bold text-sm tracking-wider shadow-xl transition-all duration-300 transform hover:-translate-y-1 ${isOfflineOpen ? 'bg-red-500 text-white hover:bg-red-600' : 'bg-white text-indigo-900 hover:bg-gray-50'}`}
+                >
+                  <span className="relative z-10 flex items-center gap-2">
+                    {isOfflineOpen ? (
+                      <>✕ CLOSE OFFLINE BREAKDOWN</>
+                    ) : (
+                      <><span className="w-2 h-2 rounded-full bg-green-500 animate-pulse"></span> OPEN OFFLINE BREAKDOWN</>
+                    )}
+                  </span>
+                </button>
+             </div>
+
+             {isOfflineOpen && (
+               <div className="animate-in fade-in zoom-in-95 duration-300">
+                  <div className="bg-indigo-900/90 p-4 rounded-2xl flex items-center gap-4 shadow-xl border border-indigo-500/50 mb-4">
+                    <label className="text-indigo-200 font-black text-sm uppercase">Number of Pax:</label>
+                    <input 
+                      type="number"
+                      value={offlinePax}
+                      onChange={(e) => setOfflinePax(e.target.value)}
+                      className="flex-1 p-3 rounded-lg bg-white border-none text-indigo-900 font-extrabold text-center text-2xl focus:ring-4 focus:ring-indigo-400/50 transition-shadow"
+                      min="1"
+                      placeholder="1"
+                    />
+                  </div>
+
+                  {offlineResult && (
+                    <div className="bg-gray-900/80 backdrop-blur-xl rounded-2xl p-6 border border-white/10 shadow-2xl">
+                      <h3 className="text-center text-indigo-300 text-xs font-bold uppercase tracking-[0.2em] mb-6">Individual Breakdown</h3>
+                      <div className="space-y-3">
+                        <ResultRow label="Penalty / Pax" value={offlineResult.c5PerPax} colorClass="text-red-300" />
+                        <ResultRow label="Base Fare / Pax" value={offlineResult.c6PerPax} colorClass="text-purple-300" />
+                        <ResultRow label="Convenience / Pax" value={offlineResult.convPerPax} colorClass="text-green-300" />
+                        <ResultRow label="Service / Pax" value={offlineResult.servicePerPax} colorClass="text-gray-400" />
+                        <div className="pt-4 mt-4 border-t border-white/20 flex justify-between items-center">
+                          <span className="text-indigo-100 font-bold uppercase text-sm">Collected Per Pax</span>
+                          <span className="text-3xl font-black text-yellow-400">₹{formatINR(offlineResult.totalPerPax)}</span>
+                        </div>
+                      </div>
+                    </div>
+                  )}
+               </div>
+             )}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+};
+
+export default App;
